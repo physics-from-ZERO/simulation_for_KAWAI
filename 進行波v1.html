@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>横波 進行波</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      background: #000;
+      height: 100dvh;
+      overflow: hidden;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+
+    #app {
+      display: flex;
+      flex-direction: column;
+      height: 100dvh;
+      padding: 8px;
+      gap: 6px;
+    }
+
+    h3 {
+      color: #0ff;
+      font-size: clamp(14px, 3.5vw, 20px);
+      flex-shrink: 0;
+    }
+
+    /* ---- ボタン群 ---- */
+    #controls {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 5px;
+      flex-shrink: 0;
+    }
+    button {
+      padding: 10px 4px;
+      border-radius: 8px;
+      border: 1px solid #444;
+      background: #111;
+      color: #ddd;
+      cursor: pointer;
+      font-size: clamp(11px, 2.8vw, 15px);
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+      white-space: nowrap;
+    }
+    button:active { background: #222; }
+    .selected-direction {
+      background-color: #00aaff !important;
+      color: #fff !important;
+      font-weight: bold;
+    }
+
+    /* ---- キャンバス領域 ---- */
+    .canvas-wrap {
+      flex: 1 1 0;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    #myCanvas {
+      flex: 7;
+      min-height: 0;
+    }
+    #timeCanvas {
+      flex: 4;
+      min-height: 0;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      background: #000;
+      border-radius: 4px;
+    }
+    .graph-label {
+      color: #9aa;
+      font-size: clamp(10px, 2.5vw, 13px);
+      text-align: center;
+      flex-shrink: 0;
+      padding: 2px 0;
+    }
+  </style>
+</head>
+<body>
+<div id="app">
+  <h3>進行波（横波）</h3>
+
+  <div id="controls">
+    <button id="start">▶ 再生</button>
+    <button id="stop">⏸ 停止</button>
+    <button id="dirx">→ 右向き進行波</button>
+    <button id="dirxx">← 左向き進行波</button>
+    <button id="sph">普通の速度</button>
+    <button id="spl">ゆっくり</button>
+  </div>
+
+  <div class="canvas-wrap">
+    <canvas id="myCanvas"></canvas>
+    <canvas id="timeCanvas"></canvas>
+    <div class="graph-label">原点の赤玉の 時間−変位 グラフ</div>
+  </div>
+</div>
+
+<script>
+  // =========================
+  // 要素取得
+  // =========================
+  const canvas     = document.getElementById("myCanvas");
+  const ctx        = canvas.getContext("2d");
+  const timeCanvas = document.getElementById("timeCanvas");
+  const tctx       = timeCanvas.getContext("2d");
+
+  const btnStart = document.getElementById("start");
+  const btnStop  = document.getElementById("stop");
+  const btnDirR  = document.getElementById("dirx");
+  const btnDirL  = document.getElementById("dirxx");
+  const btnFast  = document.getElementById("sph");
+  const btnSlow  = document.getElementById("spl");
+
+  // =========================
+  // Canvas設定（レスポンシブ）
+  // =========================
+  let CW = 0, CH = 0, TCH = 0;
+  const DPR = Math.min(window.devicePixelRatio || 1, 2);
+
+  function syncCanvasSize() {
+    const rect1 = canvas.getBoundingClientRect();
+    const rect2 = timeCanvas.getBoundingClientRect();
+
+    canvas.width      = Math.round(rect1.width  * DPR);
+    canvas.height     = Math.round(rect1.height * DPR);
+    timeCanvas.width  = Math.round(rect2.width  * DPR);
+    timeCanvas.height = Math.round(rect2.height * DPR);
+
+    CW  = canvas.width;
+    CH  = canvas.height;
+    TCH = timeCanvas.height;
+  }
+
+  function onResize() {
+    syncCanvasSize();
+    drawFrame(performance.now(), simTime);
+  }
+  const ro = new ResizeObserver(onResize);
+  ro.observe(canvas);
+  ro.observe(timeCanvas);
+
+  // =========================
+  // スケール計算ヘルパー
+  // =========================
+  function S(basePx) {
+    return Math.max(basePx * 0.5, basePx * (CW / 1000));
+  }
+
+  // =========================
+  // シミュレーション変数
+  // =========================
+  let v  = 0;
+  let f  = 1;
+  let fr = 1;
+  let av = 4;
+
+  const strobePoints   = [];
+  let   lastStrobeTime = null;
+  const strobeInterval = 200;
+  const strobeLifetime = 1000;
+
+  const timeData     = [];
+  let   simTime      = 0;
+  let   lastAnimTime = null;
+  const timeWindow   = 10;
+
+  // =========================
+  // 上のグラフ（進行波）
+  // =========================
+  function drawAxes() {
+    const axisX    = S(100);
+    const fontSize = Math.round(S(18));
+
+    ctx.strokeStyle = "white";
+    ctx.lineWidth   = Math.max(1, S(2));
+    ctx.beginPath();
+    ctx.moveTo(axisX, 0);
+    ctx.lineTo(axisX, CH);
+    ctx.moveTo(0, CH / 2);
+    ctx.lineTo(CW, CH / 2);
+    ctx.stroke();
+
+    ctx.fillStyle = "white";
+    ctx.font = `${fontSize}px sans-serif`;
+    const label = "座標 x[m]";
+    const tw = ctx.measureText(label).width;
+    ctx.fillText(label, CW - tw - S(6), CH / 2 - S(8));
+  }
+
+  // =========================
+  // 下のグラフ（時間−変位）
+  // =========================
+  function drawTimeGraph(currentTime) {
+    tctx.fillStyle = "black";
+    tctx.fillRect(0, 0, CW, TCH);
+
+    const pL = S(40), pR = S(10), pT = S(10), pB = S(18);
+    const plotW   = CW - pL - pR;
+    const plotH   = TCH - pT - pB;
+    const centerY = pT + plotH / 2;
+    const tMin    = Math.max(0, currentTime - timeWindow);
+    const fontSize  = Math.round(S(16));
+    const smallFont = Math.round(S(11));
+
+    tctx.strokeStyle = "white";
+    tctx.lineWidth   = Math.max(1, S(2));
+    tctx.beginPath();
+    tctx.moveTo(pL, centerY);
+    tctx.lineTo(CW - pR, centerY);
+    tctx.moveTo(pL, pT);
+    tctx.lineTo(pL, TCH - pB);
+    tctx.stroke();
+
+    tctx.fillStyle = "white";
+    tctx.font = `${fontSize}px sans-serif`;
+    const tLabel = "時刻 t[s]";
+    const tw2 = tctx.measureText(tLabel).width;
+    tctx.fillText(tLabel, CW - tw2 - S(6), centerY - S(8));
+
+    tctx.font = `${smallFont}px sans-serif`;
+    tctx.fillText("原点の媒質の y 座標", pL - S(28), pT + smallFont);
+
+    const visible = timeData.filter(p => p.t >= tMin);
+    if (visible.length < 2) return;
+
+    const ampPix = plotH * 0.45;
+
+    tctx.strokeStyle = "#00ff88";
+    tctx.lineWidth   = Math.max(1, S(2));
+    tctx.beginPath();
+    for (let i = 0; i < visible.length; i++) {
+      const p = visible[i];
+      const x = pL + ((p.t - tMin) / timeWindow) * plotW;
+      const y = centerY - p.disp * ampPix;
+      if (i === 0) tctx.moveTo(x, y); else tctx.lineTo(x, y);
+    }
+    tctx.stroke();
+
+    const last = visible[visible.length - 1];
+    const lx = pL + ((last.t - tMin) / timeWindow) * plotW;
+    const ly = centerY - last.disp * ampPix;
+    tctx.fillStyle = "red";
+    tctx.beginPath();
+    tctx.arc(lx, ly, S(8), 0, Math.PI * 2);
+    tctx.fill();
+  }
+
+  // =========================
+  // メイン描画
+  // =========================
+  function drawFrame(ts, currentTime) {
+    if (CW === 0) return;
+
+    ctx.fillStyle = "black";
+    ctx.fillRect(0, 0, CW, CH);
+
+    const particleR = S(20);
+    const axisX     = S(100);
+    const amp       = CH / 4;
+
+    const normAtOrigin = Math.sin((axisX - v) * 2 * Math.PI / 360);
+    const dispPx       = amp * normAtOrigin;
+    const y0           = CH / 2 - dispPx;
+
+    // ストロボ
+    if (lastStrobeTime === null) lastStrobeTime = ts;
+    if (ts - lastStrobeTime >= strobeInterval) {
+      strobePoints.push({ x: axisX, y: y0, time: ts });
+      lastStrobeTime = ts;
+    }
+    for (let i = strobePoints.length - 1; i >= 0; i--) {
+      if (ts - strobePoints[i].time > strobeLifetime) strobePoints.splice(i, 1);
+    }
+
+    // 時系列（正規化）
+    timeData.push({ t: currentTime, disp: normAtOrigin });
+    if (timeData.length > 2000) timeData.shift();
+
+    drawAxes();
+
+    // ストロボ描画
+    ctx.fillStyle = "rgba(255, 0, 0, 0.8)";
+    for (const p of strobePoints) {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, particleR / 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // 粒子列
+    for (let x = 0; x <= CW; x += particleR) {
+      const y = CH / 2 - amp * Math.sin((x - v) * 2 * Math.PI / 360);
+      const isOrigin = (Math.abs(x - axisX) < particleR / 2);
+      ctx.fillStyle = isOrigin ? "red" : "#00aaff";
+      ctx.beginPath();
+      ctx.arc(x, y, particleR / 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    drawTimeGraph(currentTime);
+  }
+
+  // =========================
+  // アニメーション
+  // =========================
+  let rafId   = null;
+  let running = false;
+
+  function step(ts) {
+    if (!running) { rafId = null; return; }
+    if (lastAnimTime === null) lastAnimTime = ts;
+    const dt = (ts - lastAnimTime) / 1000;
+    lastAnimTime = ts;
+
+    if (fr) {
+      v += f * av;
+      simTime += dt;
+    }
+
+    drawFrame(ts, simTime);
+    rafId = requestAnimationFrame(step);
+  }
+
+  function startLoop() {
+    if (running) return;
+    running = true;
+    lastAnimTime = null;
+    rafId = requestAnimationFrame(step);
+  }
+  function stopLoop() {
+    running = false;
+    if (rafId !== null) cancelAnimationFrame(rafId);
+    rafId = null;
+  }
+
+  // =========================
+  // ボタン
+  // =========================
+  function updateDirectionButtons() {
+    btnDirR.classList.toggle("selected-direction", f === 1);
+    btnDirL.classList.toggle("selected-direction", f === -1);
+  }
+  function updateSpeedButtons() {
+    btnFast.classList.toggle("selected-direction", av === 4);
+    btnSlow.classList.toggle("selected-direction", av === 2);
+  }
+
+  btnDirR.onclick  = () => { f = 1;   updateDirectionButtons(); };
+  btnDirL.onclick  = () => { f = -1;  updateDirectionButtons(); };
+  btnFast.onclick  = () => { av = 4;  updateSpeedButtons(); };
+  btnSlow.onclick  = () => { av = 2;  updateSpeedButtons(); };
+  btnStart.onclick = startLoop;
+  btnStop.onclick  = stopLoop;
+
+  // 初期化
+  syncCanvasSize();
+  drawFrame(performance.now(), simTime);
+  updateDirectionButtons();
+  updateSpeedButtons();
+  startLoop();
+</script>
+</body>
+</html>
