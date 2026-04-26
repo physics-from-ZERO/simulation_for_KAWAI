@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>横波と縦波</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    background: #000;
+    height: 100dvh;
+    overflow: hidden;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  #app {
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
+    padding: 8px;
+    gap: 6px;
+  }
+
+  h3 {
+    color: #0ff;
+    font-size: clamp(14px, 3.5vw, 20px);
+    flex-shrink: 0;
+  }
+
+  /* ---- ボタン群 ---- */
+  #controls {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  button {
+    padding: 6px 2px;
+    border-radius: 6px;
+    border: 1px solid #444;
+    background: #111;
+    color: #ddd;
+    cursor: pointer;
+    font-size: clamp(10px, 2.5vw, 14px);
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    white-space: nowrap;
+    min-height: 32px;
+  }
+  button:active { background: #222; }
+  .selected {
+    background-color: #00aaff !important;
+    color: #fff !important;
+    font-weight: bold;
+  }
+
+  /* ---- キャンバス領域 ---- */
+  .canvas-wrap {
+    flex: 1 1 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  #waveCanvas {
+    flex: 2;
+    min-height: 0;
+  }
+  #longCanvas {
+    flex: 2;
+    min-height: 0;
+  }
+
+  /* ---- 下段：振動キャンバス横並び ---- */
+  .vibration-row {
+    display: flex;
+    gap: 4px;
+    flex: 4;
+    min-height: 0;
+  }
+  .vib-wave-cell {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .vib-wave-cell canvas {
+    flex: 1;
+    min-height: 0;
+  }
+  .vib-long-cell {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    justify-content: center;
+  }
+  .vib-long-cell canvas {
+    /* 縦波振動は高さを制限して中央寄せ */
+    height: 50%;
+    min-height: 80px;
+    flex: none;
+  }
+
+  canvas {
+    display: block;
+    width: 100%;
+    background: #000;
+    border-radius: 4px;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <h3>横波と縦波</h3>
+
+  <div id="controls">
+    <button id="dirR">→ +x方向</button>
+    <button id="dirL">← −x方向</button>
+    <button id="stop">⏸ 停止</button>
+    <button id="sph">普通の速度</button>
+    <button id="spl">ゆっくり</button>
+    <button id="sizeToggle">小さい媒質で表示</button>
+  </div>
+
+  <div class="canvas-wrap">
+    <canvas id="waveCanvas"></canvas>
+    <canvas id="longCanvas"></canvas>
+
+    <!-- 下段：振動キャンバス横並び -->
+    <div class="vibration-row">
+      <div class="vib-wave-cell">
+        <canvas id="vibWaveCanvas"></canvas>
+      </div>
+      <div class="vib-long-cell">
+        <canvas id="vibLongCanvas"></canvas>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// =========================
+// 要素取得
+// =========================
+const waveCanvas = document.getElementById("waveCanvas");
+const wctx = waveCanvas.getContext("2d");
+const longCanvas = document.getElementById("longCanvas");
+const lctx = longCanvas.getContext("2d");
+const vibWaveCanvas = document.getElementById("vibWaveCanvas");
+const vwctx = vibWaveCanvas.getContext("2d");
+const vibLongCanvas = document.getElementById("vibLongCanvas");
+const vlctx = vibLongCanvas.getContext("2d");
+
+// =========================
+// レスポンシブキャンバス
+// =========================
+const DPR = Math.min(window.devicePixelRatio || 1, 2);
+let WCW = 0, WCH = 0, LCW = 0, LCH = 0;
+let VWW = 0, VWH = 0, VLW = 0, VLH = 0;
+
+function syncCanvasSize() {
+  const r1 = waveCanvas.getBoundingClientRect();
+  const r2 = longCanvas.getBoundingClientRect();
+  const r3 = vibWaveCanvas.getBoundingClientRect();
+  const r4 = vibLongCanvas.getBoundingClientRect();
+  waveCanvas.width  = Math.round(r1.width  * DPR);
+  waveCanvas.height = Math.round(r1.height * DPR);
+  longCanvas.width  = Math.round(r2.width  * DPR);
+  longCanvas.height = Math.round(r2.height * DPR);
+  vibWaveCanvas.width  = Math.round(r3.width  * DPR);
+  vibWaveCanvas.height = Math.round(r3.height * DPR);
+  vibLongCanvas.width  = Math.round(r4.width  * DPR);
+  vibLongCanvas.height = Math.round(r4.height * DPR);
+  WCW = waveCanvas.width;  WCH = waveCanvas.height;
+  LCW = longCanvas.width;  LCH = longCanvas.height;
+  VWW = vibWaveCanvas.width;  VWH = vibWaveCanvas.height;
+  VLW = vibLongCanvas.width;  VLH = vibLongCanvas.height;
+}
+
+const ro = new ResizeObserver(() => {
+  syncCanvasSize();
+  drawAll();
+});
+ro.observe(waveCanvas);
+ro.observe(longCanvas);
+ro.observe(vibWaveCanvas);
+ro.observe(vibLongCanvas);
+
+// スケールヘルパー
+function S(basePx) {
+  return Math.max(basePx * 0.5, basePx * (WCW / 1000));
+}
+
+// =========================
+// シミュレーション変数（sin1.java準拠）
+// =========================
+let v  = 0;
+let f  = 1;
+let av = 4;
+let r  = 20;
+let particleSizeSmall = false;
+
+const wavelength = 360;
+
+// =========================
+// 横波の描画
+// =========================
+function drawWave() {
+  if (WCW === 0 || WCH === 0) return;
+
+  wctx.fillStyle = "black";
+  wctx.fillRect(0, 0, WCW, WCH);
+
+  const sc = WCW / 770;
+  const scaledR = r * sc;
+  const axisX = S(120);
+  const centerY = WCH / 2;
+  const amp = WCH / 4;
+  const k = 2 * Math.PI / (wavelength * sc);
+
+  const margin = scaledR;
+  const yTop = centerY - (amp + margin) * 1.2;
+  const yBottom = centerY + (amp + margin) * 1.2;
+
+  wctx.strokeStyle = "white";
+  wctx.lineWidth = Math.max(1, 2 * sc);
+  wctx.beginPath();
+  wctx.moveTo(axisX, yBottom);
+  wctx.lineTo(axisX, yTop);
+  wctx.stroke();
+  wctx.beginPath();
+  wctx.moveTo(0, centerY);
+  wctx.lineTo(WCW, centerY);
+  wctx.stroke();
+
+  const arrowLen = S(16);
+  wctx.fillStyle = "white";
+  wctx.beginPath();
+  wctx.moveTo(WCW, centerY);
+  wctx.lineTo(WCW - arrowLen, centerY - arrowLen * 0.5);
+  wctx.lineTo(WCW - arrowLen, centerY + arrowLen * 0.5);
+  wctx.closePath();
+  wctx.fill();
+
+  wctx.beginPath();
+  wctx.moveTo(axisX, yTop);
+  wctx.lineTo(axisX - arrowLen * 0.5, yTop + arrowLen);
+  wctx.lineTo(axisX + arrowLen * 0.5, yTop + arrowLen);
+  wctx.closePath();
+  wctx.fill();
+
+  const scaledV = v * sc;
+  for (let x = 0; x <= WCW; x += scaledR) {
+    const y = centerY - amp * Math.sin((x - scaledV) * k);
+    const isOrigin = (Math.abs(x - axisX) < scaledR / 2);
+    wctx.fillStyle = isOrigin ? "red" : "#00aaff";
+    wctx.beginPath();
+    wctx.arc(x, y, scaledR / 2, 0, Math.PI * 2);
+    wctx.fill();
+  }
+
+  // タイトル
+  const titleSize = Math.max(20, Math.round(S(38)));
+  wctx.fillStyle = "white";
+  wctx.font = `bold ${titleSize}px sans-serif`;
+  wctx.textAlign = "center";
+  wctx.fillText("横波", WCW / 2, titleSize + S(4));
+  wctx.textAlign = "start";
+}
+
+// =========================
+// 縦波の描画
+// =========================
+function drawLongitudinal() {
+  if (LCW === 0 || LCH === 0) return;
+
+  lctx.fillStyle = "black";
+  lctx.fillRect(0, 0, LCW, LCH);
+
+  const sc = LCW / 770;
+  const scaledR = r * sc;
+  const axisX = S(120);
+
+  const barH = scaledR * 7;
+  const margin = scaledR;
+  const titleSize = Math.max(20, Math.round(S(38)));
+
+  // 横波と同じタイトル〜グラフ間距離にするため、
+  // タイトル下端からyTopまでの距離を横波と揃える
+  // 横波: titleBottom = titleSize + S(4), yTop = WCH/2 - (WCH/4 + scaledR)*1.2
+  //   gap = yTop - titleBottom
+  // 縦波: yTopからcenterYまでの距離 = (barH/2 + margin)*1.2
+  //   centerY = titleBottom + gap + (barH/2 + margin)*1.2
+  const titleBottom = titleSize + S(4);
+  const waveAmp = WCH / 4;
+  const waveGap = (WCH / 2 - (waveAmp + scaledR) * 1.2) - titleBottom;
+  const halfAxis = (barH / 2 + margin) * 1.2;
+  const centerY = titleBottom + Math.max(0, waveGap) + halfAxis;
+
+  const yTop = centerY - halfAxis;
+  const yBottom = centerY + halfAxis;
+
+  lctx.strokeStyle = "white";
+  lctx.lineWidth = Math.max(1, 2 * sc);
+  lctx.beginPath();
+  lctx.moveTo(axisX, yBottom);
+  lctx.lineTo(axisX, yTop);
+  lctx.stroke();
+  lctx.beginPath();
+  lctx.moveTo(0, centerY);
+  lctx.lineTo(LCW, centerY);
+  lctx.stroke();
+
+  const arrowLen = S(16);
+  lctx.fillStyle = "white";
+  lctx.beginPath();
+  lctx.moveTo(LCW, centerY);
+  lctx.lineTo(LCW - arrowLen, centerY - arrowLen * 0.5);
+  lctx.lineTo(LCW - arrowLen, centerY + arrowLen * 0.5);
+  lctx.closePath();
+  lctx.fill();
+
+  lctx.beginPath();
+  lctx.moveTo(axisX, yTop);
+  lctx.lineTo(axisX - arrowLen * 0.5, yTop + arrowLen);
+  lctx.lineTo(axisX + arrowLen * 0.5, yTop + arrowLen);
+  lctx.closePath();
+  lctx.fill();
+
+  const scaledV = v * sc;
+  const dispAmp = 40 * sc;
+  const barW = scaledR / 2;
+
+  for (let x = 0; x <= LCW; x += 2 * scaledR) {
+    const disp = dispAmp * Math.sin((x - scaledV) * 2 * Math.PI / (wavelength * sc));
+    const drawX = x + disp;
+    const isOrigin = (Math.abs(x - axisX) < scaledR);
+    lctx.fillStyle = isOrigin ? "red" : "#00aaff";
+    lctx.fillRect(drawX, centerY - barH / 2, barW, barH);
+  }
+
+  // タイトル
+  lctx.fillStyle = "white";
+  lctx.font = `bold ${titleSize}px sans-serif`;
+  lctx.textAlign = "center";
+  lctx.fillText("縦波", LCW / 2, titleSize + S(4));
+  lctx.textAlign = "start";
+}
+
+// =========================
+// 横波の原点の赤玉の振動（上下の単振動）
+// =========================
+function drawVibWave() {
+  if (VWW === 0 || VWH === 0) return;
+
+  vwctx.fillStyle = "black";
+  vwctx.fillRect(0, 0, VWW, VWH);
+
+  const sc = WCW / 770;
+  const axisX = S(120);
+  const scaledR = r * sc;
+  const k = 2 * Math.PI / (wavelength * sc);
+  const scaledV = v * sc;
+
+  const centerX = VWW / 2;
+  const labelFont = Math.max(36, Math.round(S(72)));
+  const arrowLen = S(24);
+  const titleSize = Math.max(14, Math.round(S(28)));
+
+  // タイトルをキャンバス最上部に配置
+  const titleY = titleSize + S(2);
+
+  // ⊕⊖のスペース
+  const symbolH = labelFont + S(2);
+  // 軸の上端：タイトル直下＋⊕＋矢頭
+  const yAxisTop = titleY + S(4) + symbolH + arrowLen;
+  // 軸の下端：キャンバス下端ギリギリまで使う
+  const yAxisBottom = VWH - symbolH - S(4);
+  const centerY = (yAxisTop + yAxisBottom) / 2;
+  // 振幅を3倍（利用可能スペース内で）
+  const ampBase = (yAxisBottom - yAxisTop) / 2 - scaledR * 1.2;
+  const amp = ampBase;  // 軸の長さ自体を最大限使う
+
+  // 縦軸（振動方向）＋矢頭＋⊕⊖
+  vwctx.strokeStyle = "white";
+  vwctx.lineWidth = Math.max(1.5, 2 * sc);
+  vwctx.beginPath();
+  vwctx.moveTo(centerX, yAxisBottom);
+  vwctx.lineTo(centerX, yAxisTop);
+  vwctx.stroke();
+
+  // 上矢頭
+  vwctx.fillStyle = "white";
+  vwctx.beginPath();
+  vwctx.moveTo(centerX, yAxisTop);
+  vwctx.lineTo(centerX - arrowLen * 0.5, yAxisTop + arrowLen);
+  vwctx.lineTo(centerX + arrowLen * 0.5, yAxisTop + arrowLen);
+  vwctx.closePath();
+  vwctx.fill();
+
+  // ⊕（上端）
+  vwctx.fillStyle = "white";
+  vwctx.font = `bold ${labelFont}px sans-serif`;
+  vwctx.textAlign = "center";
+  vwctx.fillText("⊕", centerX, yAxisTop - S(4));
+
+  // ⊖（下端）
+  vwctx.fillText("⊖", centerX, yAxisBottom + labelFont + S(2));
+
+  // 平衡位置の横線
+  vwctx.strokeStyle = "white";
+  vwctx.lineWidth = Math.max(1.5, 2 * sc);
+  const tickW = scaledR * 3;
+  vwctx.beginPath();
+  vwctx.moveTo(centerX - tickW, centerY);
+  vwctx.lineTo(centerX + tickW, centerY);
+  vwctx.stroke();
+
+  // 赤玉の変位（振動表示は3倍の振幅）
+  const disp = (WCH / 4) * Math.sin((axisX - scaledV) * k);
+  const normalizedDisp = disp / (WCH / 4);
+  const ballY = centerY - normalizedDisp * amp * 0.75;
+
+  // 変位ベクトル（黄色、原点→赤玉方向）
+  const dispPx = centerY - ballY; // 正:赤玉が上
+  if (Math.abs(dispPx) > scaledR * 0.5) {
+    const aHL = Math.min(S(28), Math.abs(dispPx) * 0.6);
+    const ballRadius = scaledR * 0.7;
+    // 矢頭は原点→赤玉の向き。赤玉が上なら矢頭は上向き。
+    const dir = dispPx > 0 ? -1 : 1; // -1:上向き, 1:下向き
+    // 矢頭先端を赤玉の手前にオフセット
+    const tipY = ballY - dir * (ballRadius + S(2));
+
+    vwctx.strokeStyle = "yellow";
+    vwctx.lineWidth = Math.max(6, S(9));
+    vwctx.beginPath();
+    vwctx.moveTo(centerX, centerY);
+    vwctx.lineTo(centerX, tipY);
+    vwctx.stroke();
+
+    // 矢頭（tipYから赤玉方向=dir方向に尖る）
+    vwctx.fillStyle = "yellow";
+    vwctx.beginPath();
+    vwctx.moveTo(centerX, tipY);
+    vwctx.lineTo(centerX - aHL * 0.6, tipY - dir * aHL);
+    vwctx.lineTo(centerX + aHL * 0.6, tipY - dir * aHL);
+    vwctx.closePath();
+    vwctx.fill();
+  }
+
+  // 赤玉
+  vwctx.fillStyle = "red";
+  vwctx.beginPath();
+  vwctx.arc(centerX, ballY, scaledR * 0.7, 0, Math.PI * 2);
+  vwctx.fill();
+
+  // タイトル
+  vwctx.fillStyle = "white";
+  vwctx.font = `bold ${titleSize}px sans-serif`;
+  vwctx.textAlign = "center";
+  vwctx.fillText("横波の媒質の振動", VWW / 2, titleY);
+  vwctx.textAlign = "start";
+}
+
+// =========================
+// 縦波の原点の赤棒の振動（左右の単振動）
+// =========================
+function drawVibLong() {
+  if (VLW === 0 || VLH === 0) return;
+
+  vlctx.fillStyle = "black";
+  vlctx.fillRect(0, 0, VLW, VLH);
+
+  const sc = WCW / 770;
+  const axisX = S(120);
+  const scaledR = r * sc;
+  const scaledV = v * sc;
+  const dispAmp = 40 * sc;
+
+  const centerX = VLW / 2;
+  const centerY = VLH / 2;
+  const barH = scaledR * 7;
+  const barW = scaledR / 2;
+  const labelFont = Math.max(36, Math.round(S(72)));
+  const arrowLen = S(24);
+
+  // 横軸（振動方向）＋矢頭＋⊕⊖
+  // ⊕⊖ラベル＋余白分を確保してからキャンバス内に収める
+  const symbolW = labelFont + S(8);  // ⊕⊖の幅＋余白
+  const maxAxisHalf = (VLW / 2) - symbolW - arrowLen;
+  const vibDispAmp = dispAmp * 2.4;
+  const rawAxisHalf = vibDispAmp + scaledR * 3;
+  const axisHalf = Math.min(rawAxisHalf, maxAxisHalf);
+  const xAxisLeft = centerX - axisHalf;
+  const xAxisRight = centerX + axisHalf;
+
+  vlctx.strokeStyle = "white";
+  vlctx.lineWidth = Math.max(1.5, 2 * sc);
+  vlctx.beginPath();
+  vlctx.moveTo(xAxisLeft, centerY);
+  vlctx.lineTo(xAxisRight, centerY);
+  vlctx.stroke();
+
+  // 右矢頭
+  vlctx.fillStyle = "white";
+  vlctx.beginPath();
+  vlctx.moveTo(xAxisRight, centerY);
+  vlctx.lineTo(xAxisRight - arrowLen, centerY - arrowLen * 0.5);
+  vlctx.lineTo(xAxisRight - arrowLen, centerY + arrowLen * 0.5);
+  vlctx.closePath();
+  vlctx.fill();
+
+  // ⊕（右端）
+  vlctx.fillStyle = "white";
+  vlctx.font = `bold ${labelFont}px sans-serif`;
+  vlctx.textAlign = "left";
+  vlctx.fillText("⊕", xAxisRight + S(3), centerY + labelFont * 0.35);
+
+  // ⊖（左端）
+  vlctx.textAlign = "right";
+  vlctx.fillText("⊖", xAxisLeft - S(3), centerY + labelFont * 0.35);
+
+  // 平衡位置の縦線
+  vlctx.strokeStyle = "white";
+  vlctx.lineWidth = Math.max(1.5, 2 * sc);
+  const tickH = scaledR * 3;
+  vlctx.beginPath();
+  vlctx.moveTo(centerX, centerY - tickH);
+  vlctx.lineTo(centerX, centerY + tickH);
+  vlctx.stroke();
+
+  // 赤棒の変位（振動表示は2倍の振幅）
+  const disp = dispAmp * 2.4 * Math.sin((axisX - scaledV) * 2 * Math.PI / (wavelength * sc));
+  const barX = centerX + disp;
+
+  // 変位ベクトル（黄色、原点→赤棒方向）
+  if (Math.abs(disp) > scaledR * 0.3) {
+    const aHL = Math.min(S(28), Math.abs(disp) * 0.6);
+    // dir: 赤棒の方向。disp>0なら右(+1), disp<0なら左(-1)
+    const dir = disp > 0 ? 1 : -1;
+    // 矢頭先端を赤棒の手前にオフセット
+    const tipX = barX - dir * (barW / 2 + S(2));
+
+    vlctx.strokeStyle = "yellow";
+    vlctx.lineWidth = Math.max(6, S(9));
+    vlctx.beginPath();
+    vlctx.moveTo(centerX, centerY);
+    vlctx.lineTo(tipX, centerY);
+    vlctx.stroke();
+
+    // 矢頭（tipXから赤棒方向=dir方向に尖る）
+    vlctx.fillStyle = "yellow";
+    vlctx.beginPath();
+    vlctx.moveTo(tipX, centerY);
+    vlctx.lineTo(tipX - dir * aHL, centerY - aHL * 0.6);
+    vlctx.lineTo(tipX - dir * aHL, centerY + aHL * 0.6);
+    vlctx.closePath();
+    vlctx.fill();
+  }
+
+  // 赤棒
+  vlctx.fillStyle = "red";
+  vlctx.fillRect(barX - barW / 2, centerY - barH / 2, barW, barH);
+
+  // タイトル
+  const titleSize = Math.max(14, Math.round(S(28)));
+  vlctx.fillStyle = "white";
+  vlctx.font = `bold ${titleSize}px sans-serif`;
+  vlctx.textAlign = "center";
+  vlctx.fillText("縦波の媒質の振動", VLW / 2, titleSize + S(4));
+  vlctx.textAlign = "start";
+}
+
+// =========================
+// まとめて描画
+// =========================
+function drawAll() {
+  drawWave();
+  drawLongitudinal();
+  drawVibWave();
+  drawVibLong();
+}
+
+// =========================
+// アニメーション
+// =========================
+function move() {
+  v += f * av;
+}
+
+setInterval(() => {
+  move();
+  drawAll();
+}, 20);
+
+// =========================
+// ボタン
+// =========================
+const btnDirR = document.getElementById("dirR");
+const btnDirL = document.getElementById("dirL");
+const btnStop = document.getElementById("stop");
+const btnFast = document.getElementById("sph");
+const btnSlow = document.getElementById("spl");
+const btnSize = document.getElementById("sizeToggle");
+
+function updateDirButtons() {
+  btnDirR.classList.toggle("selected", f === 1 && av > 0);
+  btnDirL.classList.toggle("selected", f === -1 && av > 0);
+  btnStop.classList.toggle("selected", av === 0);
+}
+function updateSpeedButtons() {
+  btnFast.classList.toggle("selected", av === 4);
+  btnSlow.classList.toggle("selected", av === 1.875);
+}
+function updateSizeButton() {
+  btnSize.textContent = particleSizeSmall ? "大きい媒質で表示" : "小さい媒質で表示";
+}
+
+btnDirR.onclick = () => { f = 1; av = 4; updateDirButtons(); updateSpeedButtons(); };
+btnDirL.onclick = () => { f = -1; av = 4; updateDirButtons(); updateSpeedButtons(); };
+btnStop.onclick = () => { av = 0; updateDirButtons(); updateSpeedButtons(); };
+btnFast.onclick = () => { av = 4; updateDirButtons(); updateSpeedButtons(); };
+btnSlow.onclick = () => { av = 1.875; updateDirButtons(); updateSpeedButtons(); };
+btnSize.onclick = () => {
+  particleSizeSmall = !particleSizeSmall;
+  r = particleSizeSmall ? 10 : 20;
+  updateSizeButton();
+};
+
+// 初期化
+syncCanvasSize();
+updateDirButtons();
+updateSpeedButtons();
+updateSizeButton();
+drawAll();
+</script>
+</body>
+</html>
