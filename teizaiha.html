@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>定在波</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    background: #000;
+    height: 100dvh;
+    overflow: hidden;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  #app {
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
+    padding: 8px;
+    gap: 6px;
+  }
+
+  h3 {
+    color: #0ff;
+    font-size: clamp(14px, 3.5vw, 20px);
+    flex-shrink: 0;
+  }
+
+  /* ---- ボタン群 ---- */
+  #controls {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  button {
+    padding: 6px 2px;
+    border-radius: 6px;
+    border: 1px solid #444;
+    background: #111;
+    color: #ddd;
+    cursor: pointer;
+    font-size: clamp(10px, 2.5vw, 14px);
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    white-space: nowrap;
+    min-height: 32px;
+  }
+  button:active { background: #222; }
+  .selected-boundary {
+    background-color: #00aaff !important;
+    color: #fff !important;
+    font-weight: bold;
+  }
+
+  /* ---- キャンバス領域 ---- */
+  .canvas-wrap {
+    flex: 0 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  #myCanvas {
+    display: block;
+    width: 100%;
+    /* 利用可能な高さの約2/3に制限 */
+    max-height: calc((100dvh - 180px) * 0.66);
+    background: #000;
+    border-radius: 4px;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <h3>定在波</h3>
+
+  <!-- ボタン群：3列グリッド -->
+  <div id="controls">
+    <!-- 1行目 -->
+    <button id="run">▶ 初めから再生</button>
+    <button id="stop">⏸ 停止</button>
+    <button id="reset">リセット</button>
+    <!-- 2行目 -->
+    <button id="sh">普通の速度</button>
+    <button id="sl">ゆっくり</button>
+    <button id="phaseToggle">逆位相スタートOFF</button>
+    <!-- 3行目 -->
+    <button id="inci">入射波OFF</button>
+    <button id="ref">反射波OFF</button>
+    <button id="compo">合成波OFF</button>
+    <!-- 4行目 -->
+    <button id="free">自由端</button>
+    <button id="fixed">固定端</button>
+    <button id="sizeToggle">小さい媒質で表示</button>
+  </div>
+
+  <div class="canvas-wrap">
+    <canvas id="myCanvas" width="770" height="360"></canvas>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById("myCanvas");
+const ctx = canvas.getContext("2d");
+
+// ---- レスポンシブキャンバス ----
+const DPR = Math.min(window.devicePixelRatio || 1, 2);
+let CW = 0, CH = 0;
+
+// 内部論理サイズ（元のコードと同じ基準）
+const BASE_W = 770;
+const BASE_H = 360;
+
+function syncCanvasSize() {
+  const rect = canvas.getBoundingClientRect();
+  canvas.width  = Math.round(rect.width  * DPR);
+  canvas.height = Math.round(rect.height * DPR);
+  CW = canvas.width;
+  CH = canvas.height;
+}
+
+const ro = new ResizeObserver(() => {
+  syncCanvasSize();
+  if (buffer) { drawToBuffer(); ctx.clearRect(0, 0, CW, CH); ctx.drawImage(buffer, 0, 0); }
+});
+ro.observe(canvas);
+
+// iframe内で display:none→block 切り替え時の再描画対応
+window.addEventListener('resize', () => {
+  syncCanvasSize();
+  if (buffer) { drawToBuffer(); ctx.clearRect(0, 0, CW, CH); ctx.drawImage(buffer, 0, 0); }
+});
+
+let x, y;
+let v;
+let dv;
+let av;
+let f;
+let r, l, m, op;
+let c, e;
+
+// 表示フラグ
+let showInci  = true;
+let showRef   = true;
+let showCompo = true;
+
+// リセットモード
+let resetMode = false;
+
+// 逆位相スタートフラグ
+let reversePhaseStart = false;
+
+// 媒質サイズ
+let particleSizeSmall = true;
+
+let buffer = null;
+let d = { width: BASE_W, height: BASE_H };
+
+function init() {
+    d = { width: CW || BASE_W, height: CH || BASE_H };
+
+    f  = 1;
+    v  = 0;
+    av = 3;
+    dv = av;
+    r  = 10;
+    l  = 240;
+    m  = 3;
+    op = 180;
+    c  = 1;
+    e  = -1;
+
+    buffer = createBuffer(d.width, d.height);
+    drawToBuffer();
+
+    updateBoundaryDisplay();
+    updateWaveButtons();
+    updatePhaseButton();
+    updateSpeedButtons();
+    updateSizeButton();
+}
+
+function createBuffer(width, height) {
+    const offscreenCanvas = document.createElement("canvas");
+    offscreenCanvas.width  = width;
+    offscreenCanvas.height = height;
+    return offscreenCanvas;
+}
+
+function updateBoundaryDisplay() {
+    const freeBtn  = document.getElementById("free");
+    const fixedBtn = document.getElementById("fixed");
+
+    if (e === -1) {
+        freeBtn.classList.add("selected-boundary");
+        fixedBtn.classList.remove("selected-boundary");
+    } else {
+        fixedBtn.classList.add("selected-boundary");
+        freeBtn.classList.remove("selected-boundary");
+    }
+}
+
+function updateWaveButtons() {
+    document.getElementById("inci").textContent  = showInci  ? "入射波OFF" : "入射波ON";
+    document.getElementById("ref").textContent   = showRef   ? "反射波OFF" : "反射波ON";
+    document.getElementById("compo").textContent = showCompo ? "合成波OFF" : "合成波ON";
+}
+
+function updatePhaseButton() {
+    const phaseBtn = document.getElementById("phaseToggle");
+    phaseBtn.textContent = reversePhaseStart ? "逆位相スタートON" : "逆位相スタートOFF";
+}
+
+function updateSpeedButtons() {
+    document.getElementById("sh").classList.toggle("selected-boundary", av >= 2 && av !== 1);
+    document.getElementById("sl").classList.toggle("selected-boundary", av === 1);
+}
+
+function updateSizeButton() {
+    document.getElementById("sizeToggle").textContent = particleSizeSmall ? "大きい媒質で表示" : "小さい媒質で表示";
+}
+
+function drawToBuffer() {
+    // バッファサイズをキャンバスに合わせる
+    if (buffer.width !== CW || buffer.height !== CH) {
+        buffer.width  = CW || BASE_W;
+        buffer.height = CH || BASE_H;
+    }
+    d = { width: buffer.width, height: buffer.height };
+
+    const g = buffer.getContext("2d");
+
+    // スケール係数
+    const sx = d.width  / BASE_W;
+    const sy = d.height / BASE_H;
+    const sc = Math.min(sx, sy);
+
+    const scaledR  = r * sc;
+    const scaledL  = l * sc;
+    const scaledOp = op * sc;
+
+    let wallXposRaw = scaledOp + (2 * m + c) * scaledL / 4;
+    const wallW = 40 * sc;
+    // グラフ全体の幅（反射壁含む）
+    const totalGraphW = wallXposRaw + wallW;
+    // センタリング用オフセット
+    const offsetX = Math.max(0, (d.width - totalGraphW) / 2);
+
+    let wallXpos = wallXposRaw + offsetX;
+    let centerY  = d.height / 2;
+    let amp      = d.height / 6;
+    let k        = 2 * Math.PI / scaledL;
+
+    // scaledOp にもオフセットを加算
+    const drawOp = scaledOp + offsetX;
+
+    const phaseSign = reversePhaseStart ? -1 : 1;
+
+    g.fillStyle = "black";
+    g.fillRect(0, 0, d.width, d.height);
+
+    /* 軸（反射壁の位置まで） */
+    g.strokeStyle = "white";
+    g.lineWidth   = 2.25 * sc;
+    g.beginPath();
+    g.moveTo(drawOp, 0);
+    g.lineTo(drawOp, d.height);
+    g.moveTo(offsetX, centerY);
+    g.lineTo(wallXpos, centerY);
+    g.stroke();
+
+    /* グリッド */
+    g.strokeStyle = "white";
+    g.lineWidth   = 1.0 * sc;
+    let quarter = scaledL / 4;
+    g.beginPath();
+    for (let gx = offsetX; gx <= wallXpos; gx += quarter) {
+        g.moveTo(gx, 0);
+        g.lineTo(gx, d.height);
+    }
+    g.stroke();
+
+    g.beginPath();
+    for (let gy = centerY - amp; gy >= 0; gy -= amp) {
+        g.moveTo(offsetX, gy);
+        g.lineTo(wallXpos, gy);
+    }
+    for (let gy = centerY + amp; gy <= d.height; gy += amp) {
+        g.moveTo(offsetX, gy);
+        g.lineTo(wallXpos, gy);
+    }
+    g.stroke();
+
+    /* 反射壁 */
+    g.fillStyle = "white";
+    g.fillRect(wallXpos, 0, wallW, d.height);
+
+    g.fillStyle = "black";
+    const wallFontSize = Math.max(12, Math.round(20 * sc));
+    g.font = `${wallFontSize}px sans-serif`;
+    g.textAlign = "center";
+    let wallX = wallXpos + wallW / 2;
+    const text = "反射壁";
+    for (let i = 0; i < text.length; i++) {
+        g.fillText(text[i], wallX, 40 * sc + i * 24 * sc);
+    }
+
+    if (resetMode) {
+        g.fillStyle = "gray";
+        for (x = offsetX; x <= wallXpos; x += scaledR) {
+            g.beginPath();
+            g.arc(x, centerY, scaledR / 2, 0, Math.PI * 2);
+            g.fill();
+        }
+        return;
+    }
+
+    let baseReflect = (e === -1 ? 1 : -1);
+    let sReflect    = phaseSign * baseReflect;
+
+    const scaledV = v * sc;
+
+    // 物理計算用の壁位置（オフセットなし）
+    const physWall = wallXposRaw;
+
+    /* 反射波（黄色） */
+    if (showRef) {
+        for (x = 0; x <= physWall; x += scaledR) {
+            let xMirror = 2 * physWall - x;
+            let dispRef = 0;
+
+            if (scaledV >= 2 * physWall - x) {
+                dispRef = sReflect * (amp * Math.sin((xMirror - scaledV) * k));
+            }
+
+            if (dispRef !== 0) {
+                g.fillStyle = "yellow";
+                g.beginPath();
+                g.arc(x + offsetX, centerY + dispRef, scaledR / 2, 0, Math.PI * 2);
+                g.fill();
+            }
+        }
+    }
+
+    /* 合成波（赤） */
+    if (showCompo) {
+        for (x = 0; x <= physWall; x += scaledR) {
+            let dispInciBase = (x <= scaledV ? amp * Math.sin((x - scaledV) * k) : 0);
+            let dispInci     = phaseSign * dispInciBase;
+
+            let xMirror = 2 * physWall - x;
+            let dispRef = (scaledV >= 2 * physWall - x
+                ? sReflect * amp * Math.sin((xMirror - scaledV) * k)
+                : 0);
+
+            g.fillStyle = "red";
+            g.beginPath();
+            g.arc(x + offsetX, centerY + dispInci + dispRef, scaledR / 2, 0, Math.PI * 2);
+            g.fill();
+        }
+    }
+
+    /* 入射波（青） */
+    if (showInci) {
+        for (x = 0; x <= physWall; x += scaledR) {
+            let dispInciBase = (x <= scaledV ? amp * Math.sin((x - scaledV) * k) : 0);
+            let dispInci     = phaseSign * dispInciBase;
+
+            g.fillStyle = "deepskyblue";
+            g.beginPath();
+            g.arc(x + offsetX, centerY + dispInci, scaledR / 2, 0, Math.PI * 2);
+            g.fill();
+        }
+    }
+}
+
+function move() {
+    dv = f * av;
+    v += dv;
+}
+
+function start() {
+    setInterval(() => {
+        // iframe が display:none → block に切り替わった場合の再初期化
+        const rect = canvas.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0 && (CW === 0 || CH === 0)) {
+            syncCanvasSize();
+            if (buffer) {
+                buffer.width  = CW;
+                buffer.height = CH;
+            }
+        }
+        if (CW === 0 || CH === 0) return; // まだ非表示なら描画スキップ
+
+        move();
+        drawToBuffer();
+        ctx.clearRect(0, 0, CW, CH);
+        ctx.drawImage(buffer, 0, 0);
+    }, 30);
+}
+
+/* ======== ボタン設定 ======== */
+document.getElementById("run").addEventListener("click", run);
+document.getElementById("stop").addEventListener("click", stop);
+document.getElementById("reset").addEventListener("click", reset);
+
+document.getElementById("free").addEventListener("click", () => {
+    e = -1;
+    updateBoundaryDisplay();
+});
+
+document.getElementById("fixed").addEventListener("click", () => {
+    e = 1;
+    updateBoundaryDisplay();
+});
+
+document.getElementById("inci").addEventListener("click", () => {
+    showInci = !showInci;
+    updateWaveButtons();
+});
+
+document.getElementById("ref").addEventListener("click", () => {
+    showRef = !showRef;
+    updateWaveButtons();
+});
+
+document.getElementById("compo").addEventListener("click", () => {
+    showCompo = !showCompo;
+    updateWaveButtons();
+});
+
+document.getElementById("phaseToggle").addEventListener("click", () => {
+    reversePhaseStart = !reversePhaseStart;
+    updatePhaseButton();
+});
+
+document.getElementById("sh").addEventListener("click", () => {
+    av = 2;
+    updateSpeedButtons();
+});
+document.getElementById("sl").addEventListener("click", () => {
+    av = 1;
+    updateSpeedButtons();
+});
+
+document.getElementById("sizeToggle").addEventListener("click", () => {
+    particleSizeSmall = !particleSizeSmall;
+    r = particleSizeSmall ? 10 : 15;
+    updateSizeButton();
+});
+
+function stop() { av = 0; updateSpeedButtons(); }
+
+function run() {
+    resetMode = false;
+    v  = 0;
+    av = 3;
+
+    showInci  = true;
+    showRef   = true;
+    showCompo = true;
+    updateWaveButtons();
+    updateSpeedButtons();
+}
+
+function reset() {
+    resetMode = true;
+    v = 0;
+    av = 0;
+
+    showInci  = false;
+    showRef   = false;
+    showCompo = false;
+    updateWaveButtons();
+    updateSpeedButtons();
+
+    drawToBuffer();
+    ctx.clearRect(0, 0, CW, CH);
+    ctx.drawImage(buffer, 0, 0);
+}
+
+syncCanvasSize();
+init();
+start();
+</script>
+
+</body>
+</html>
