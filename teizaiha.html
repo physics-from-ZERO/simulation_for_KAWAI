@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>定在波</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    background: #000;
+    height: 100dvh;
+    overflow: hidden;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  #app {
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
+    padding: 8px;
+    gap: 6px;
+  }
+
+  h3 {
+    color: #0ff;
+    font-size: clamp(14px, 3.5vw, 20px);
+    flex-shrink: 0;
+  }
+
+  /* ---- ボタン群 ---- */
+  #controls {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  button {
+    padding: 6px 2px;
+    border-radius: 6px;
+    border: 1px solid #444;
+    background: #111;
+    color: #ddd;
+    cursor: pointer;
+    font-size: clamp(10px, 2.5vw, 14px);
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    white-space: nowrap;
+    min-height: 32px;
+  }
+  button:active { background: #222; }
+  .selected-boundary {
+    background-color: #00aaff !important;
+    color: #fff !important;
+    font-weight: bold;
+  }
+
+  /* ---- キャンバス領域 ---- */
+  .canvas-wrap {
+    flex: 0 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  #myCanvas {
+    display: block;
+    width: 100%;
+    /* 元のコードと同じ：利用可能な高さの約2/3に制限し縦横比を保つ */
+    max-height: calc((100dvh - 180px) * 0.55);
+    background: #000;
+    border-radius: 4px;
+  }
+  #longCanvas {
+    display: block;
+    width: 100%;
+    /* 上のキャンバスの約1/3の高さ */
+    max-height: calc((100dvh - 180px) * 0.22);
+    background: #000;
+    border-radius: 4px;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <h3>定在波</h3>
+
+  <!-- ボタン群：3列グリッド -->
+  <div id="controls">
+    <!-- 1行目 -->
+    <button id="run">▶ 初めから再生</button>
+    <button id="stop">⏸ 停止</button>
+    <button id="reset">リセット</button>
+    <!-- 2行目 -->
+    <button id="sh">普通の速度</button>
+    <button id="sl">ゆっくり</button>
+    <button id="phaseToggle">逆位相スタートOFF</button>
+    <!-- 3行目 -->
+    <button id="inci">入射波OFF</button>
+    <button id="ref">反射波OFF</button>
+    <button id="compo">合成波OFF</button>
+    <!-- 4行目 -->
+    <button id="free">自由端</button>
+    <button id="fixed">固定端</button>
+    <button id="sizeToggle">小さい媒質で表示</button>
+  </div>
+
+  <div class="canvas-wrap">
+    <canvas id="myCanvas" width="770" height="360"></canvas>
+    <canvas id="longCanvas" width="770" height="180"></canvas>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById("myCanvas");
+const ctx = canvas.getContext("2d");
+const longCanvas = document.getElementById("longCanvas");
+const lctx = longCanvas.getContext("2d");
+
+// ---- レスポンシブキャンバス ----
+const DPR = Math.min(window.devicePixelRatio || 1, 2);
+let CW = 0, CH = 0;
+let LCW = 0, LCH = 0;
+
+// 内部論理サイズ（元のコードと同じ基準）
+const BASE_W = 770;
+const BASE_H = 360;
+const LONG_BASE_H = 180;
+
+function syncCanvasSize() {
+  const rect = canvas.getBoundingClientRect();
+  canvas.width  = Math.round(rect.width  * DPR);
+  canvas.height = Math.round(rect.height * DPR);
+  CW = canvas.width;
+  CH = canvas.height;
+
+  const rect2 = longCanvas.getBoundingClientRect();
+  longCanvas.width  = Math.round(rect2.width  * DPR);
+  longCanvas.height = Math.round(rect2.height * DPR);
+  LCW = longCanvas.width;
+  LCH = longCanvas.height;
+}
+
+const ro = new ResizeObserver(() => {
+  syncCanvasSize();
+  if (buffer) { drawToBuffer(); ctx.clearRect(0, 0, CW, CH); ctx.drawImage(buffer, 0, 0); }
+  drawLongWave();
+});
+ro.observe(canvas);
+ro.observe(longCanvas);
+
+window.addEventListener('resize', () => {
+  syncCanvasSize();
+  if (buffer) { drawToBuffer(); ctx.clearRect(0, 0, CW, CH); ctx.drawImage(buffer, 0, 0); }
+  drawLongWave();
+});
+
+let x, y;
+let v;
+let dv;
+let av;
+let f;
+let r, l, m, op;
+let c, e;
+
+// 表示フラグ
+let showInci  = true;
+let showRef   = true;
+let showCompo = true;
+
+// リセットモード
+let resetMode = false;
+
+// 逆位相スタートフラグ
+let reversePhaseStart = false;
+
+// 媒質サイズ
+let particleSizeSmall = true;
+
+let buffer = null;
+let d = { width: BASE_W, height: BASE_H };
+
+function init() {
+    d = { width: CW || BASE_W, height: CH || BASE_H };
+
+    f  = 1;
+    v  = 0;
+    av = 3;
+    dv = av;
+    r  = 10;
+    l  = 240;
+    m  = 3;
+    op = 180;
+    c  = 1;
+    e  = -1;
+
+    buffer = createBuffer(d.width, d.height);
+    drawToBuffer();
+
+    updateBoundaryDisplay();
+    updateWaveButtons();
+    updatePhaseButton();
+    updateSpeedButtons();
+    updateSizeButton();
+}
+
+function createBuffer(width, height) {
+    const offscreenCanvas = document.createElement("canvas");
+    offscreenCanvas.width  = width;
+    offscreenCanvas.height = height;
+    return offscreenCanvas;
+}
+
+function updateBoundaryDisplay() {
+    const freeBtn  = document.getElementById("free");
+    const fixedBtn = document.getElementById("fixed");
+
+    if (e === -1) {
+        freeBtn.classList.add("selected-boundary");
+        fixedBtn.classList.remove("selected-boundary");
+    } else {
+        fixedBtn.classList.add("selected-boundary");
+        freeBtn.classList.remove("selected-boundary");
+    }
+}
+
+function updateWaveButtons() {
+    document.getElementById("inci").textContent  = showInci  ? "入射波OFF" : "入射波ON";
+    document.getElementById("ref").textContent   = showRef   ? "反射波OFF" : "反射波ON";
+    document.getElementById("compo").textContent = showCompo ? "合成波OFF" : "合成波ON";
+}
+
+function updatePhaseButton() {
+    const phaseBtn = document.getElementById("phaseToggle");
+    phaseBtn.textContent = reversePhaseStart ? "逆位相スタートON" : "逆位相スタートOFF";
+}
+
+function updateSpeedButtons() {
+    document.getElementById("sh").classList.toggle("selected-boundary", av >= 2 && av !== 1);
+    document.getElementById("sl").classList.toggle("selected-boundary", av === 1);
+}
+
+function updateSizeButton() {
+    document.getElementById("sizeToggle").textContent = particleSizeSmall ? "大きい媒質で表示" : "小さい媒質で表示";
+}
+
+// ============================================================
+// 横波キャンバスの描画に必要なレイアウト情報を返すヘルパー
+// （横波キャンバスと縦波キャンバスで壁位置を揃えるため）
+// ============================================================
+function getWaveLayout(canvasW, canvasH) {
+    const sx = canvasW / BASE_W;
+    const sy = canvasH / BASE_H;
+    const sc = Math.min(sx, sy);
+
+    const scaledR  = r * sc;
+    const scaledL  = l * sc;
+    const scaledOp = op * sc;
+
+    const wallXposRaw = scaledOp + (2 * m + c) * scaledL / 4;
+    const wallW = 40 * sc;
+    const totalGraphW = wallXposRaw + wallW;
+    const offsetX = Math.max(0, (canvasW - totalGraphW) / 2);
+
+    const wallXpos = wallXposRaw + offsetX;
+    const centerY  = canvasH / 2;
+    const amp      = canvasH / 6;
+    const k        = 2 * Math.PI / scaledL;
+    const drawOp   = scaledOp + offsetX;
+
+    return { sc, scaledR, scaledL, scaledOp, wallXposRaw, wallW, totalGraphW, offsetX, wallXpos, centerY, amp, k, drawOp };
+}
+
+function drawToBuffer() {
+    // バッファサイズをキャンバスに合わせる
+    if (buffer.width !== CW || buffer.height !== CH) {
+        buffer.width  = CW || BASE_W;
+        buffer.height = CH || BASE_H;
+    }
+    d = { width: buffer.width, height: buffer.height };
+
+    const g = buffer.getContext("2d");
+    const lay = getWaveLayout(d.width, d.height);
+
+    const { sc, scaledR, scaledL, scaledOp, wallXposRaw, wallW, offsetX, wallXpos, centerY, amp, k, drawOp } = lay;
+
+    const phaseSign = reversePhaseStart ? -1 : 1;
+
+    g.fillStyle = "black";
+    g.fillRect(0, 0, d.width, d.height);
+
+    /* 軸（反射壁の位置まで） */
+    g.strokeStyle = "white";
+    g.lineWidth   = 2.25 * sc;
+    g.beginPath();
+    g.moveTo(drawOp, 0);
+    g.lineTo(drawOp, d.height);
+    g.moveTo(offsetX, centerY);
+    g.lineTo(wallXpos, centerY);
+    g.stroke();
+
+    /* グリッド */
+    g.strokeStyle = "white";
+    g.lineWidth   = 1.0 * sc;
+    let quarter = scaledL / 4;
+    g.beginPath();
+    for (let gx = offsetX; gx <= wallXpos; gx += quarter) {
+        g.moveTo(gx, 0);
+        g.lineTo(gx, d.height * 6 / 7);
+    }
+    g.stroke();
+
+    g.beginPath();
+    for (let gy = centerY - amp; gy >= 0; gy -= amp) {
+        g.moveTo(offsetX, gy);
+        g.lineTo(wallXpos, gy);
+    }
+    for (let gy = centerY + amp; gy <= d.height; gy += amp) {
+        g.moveTo(offsetX, gy);
+        g.lineTo(wallXpos, gy);
+    }
+    g.stroke();
+
+    /* 反射壁 */
+    g.fillStyle = "white";
+    g.fillRect(wallXpos, 0, wallW, d.height);
+
+    g.fillStyle = "black";
+    const wallFontSize = Math.max(12, Math.round(20 * sc));
+    g.font = `${wallFontSize}px sans-serif`;
+    g.textAlign = "center";
+    let wallX = wallXpos + wallW / 2;
+    const text = "反射壁";
+    for (let i = 0; i < text.length; i++) {
+        g.fillText(text[i], wallX, 40 * sc + i * 24 * sc);
+    }
+
+    if (resetMode) {
+        g.fillStyle = "gray";
+        for (x = offsetX; x <= wallXpos; x += scaledR) {
+            g.beginPath();
+            g.arc(x, centerY, scaledR / 2, 0, Math.PI * 2);
+            g.fill();
+        }
+        return;
+    }
+
+    let baseReflect = (e === -1 ? 1 : -1);
+    let sReflect    = phaseSign * baseReflect;
+
+    const scaledV = v * sc;
+
+    // 物理計算用の壁位置（オフセットなし）
+    const physWall = wallXposRaw;
+
+    /* 反射波（黄色） */
+    if (showRef) {
+        for (x = 0; x <= physWall; x += scaledR) {
+            let xMirror = 2 * physWall - x;
+            let dispRef = 0;
+
+            if (scaledV >= 2 * physWall - x) {
+                dispRef = sReflect * (amp * Math.sin((xMirror - scaledV) * k));
+            }
+
+            if (dispRef !== 0) {
+                g.fillStyle = "yellow";
+                g.beginPath();
+                g.arc(x + offsetX, centerY + dispRef, scaledR / 2, 0, Math.PI * 2);
+                g.fill();
+            }
+        }
+    }
+
+    /* 合成波（赤） */
+    if (showCompo) {
+        for (x = 0; x <= physWall; x += scaledR) {
+            let dispInciBase = (x <= scaledV ? amp * Math.sin((x - scaledV) * k) : 0);
+            let dispInci     = phaseSign * dispInciBase;
+
+            let xMirror = 2 * physWall - x;
+            let dispRef = (scaledV >= 2 * physWall - x
+                ? sReflect * amp * Math.sin((xMirror - scaledV) * k)
+                : 0);
+
+            g.fillStyle = "red";
+            g.beginPath();
+            g.arc(x + offsetX, centerY + dispInci + dispRef, scaledR / 2, 0, Math.PI * 2);
+            g.fill();
+        }
+    }
+
+    /* 入射波（青） */
+    if (showInci) {
+        for (x = 0; x <= physWall; x += scaledR) {
+            let dispInciBase = (x <= scaledV ? amp * Math.sin((x - scaledV) * k) : 0);
+            let dispInci     = phaseSign * dispInciBase;
+
+            g.fillStyle = "deepskyblue";
+            g.beginPath();
+            g.arc(x + offsetX, centerY + dispInci, scaledR / 2, 0, Math.PI * 2);
+            g.fill();
+        }
+    }
+
+    /* 腹・節ラベル（定在波形成後に表示） */
+    const scaledV_check = v * sc;
+    const physWall_check = wallXposRaw;
+    if (scaledV_check >= 2 * physWall_check) {
+        const halfL = scaledL / 4 * 2; // λ/2
+        const quarterL = scaledL / 4;
+        const labelY = d.height * 14 / 15; // 下側1/15の位置
+        const labelFontSize = Math.max(10, Math.round(28 * sc));
+        g.font = `bold ${labelFontSize}px sans-serif`;
+        g.textAlign = "center";
+
+        // 自由端(e=-1): 壁が腹、壁からλ/4が節、λ/2が腹、...
+        // 固定端(e=1):  壁が節、壁からλ/4が腹、λ/2が節、...
+
+        // 腹の位置（青）
+        g.fillStyle = "#4488ff";
+        if (e === -1) {
+            // 自由端: 腹は壁から n*halfL の位置
+            for (let n = 0; ; n++) {
+                const pos = physWall_check - n * halfL;
+                if (pos < 0) break;
+                g.fillText("腹", pos + offsetX, labelY);
+            }
+        } else {
+            // 固定端: 腹は壁から quarterL + n*halfL の位置
+            for (let n = 0; ; n++) {
+                const pos = physWall_check - quarterL - n * halfL;
+                if (pos < 0) break;
+                g.fillText("腹", pos + offsetX, labelY);
+            }
+        }
+
+        // 節の位置（ピンク）
+        g.fillStyle = "#ff66aa";
+        if (e === -1) {
+            // 自由端: 節は壁から quarterL + n*halfL の位置
+            for (let n = 0; ; n++) {
+                const pos = physWall_check - quarterL - n * halfL;
+                if (pos < 0) break;
+                g.fillText("節", pos + offsetX, labelY);
+            }
+        } else {
+            // 固定端: 節は壁から n*halfL の位置
+            for (let n = 0; ; n++) {
+                const pos = physWall_check - n * halfL;
+                if (pos < 0) break;
+                g.fillText("節", pos + offsetX, labelY);
+            }
+        }
+    }
+}
+
+// ============================================================
+// 縦波（定在波）の描画
+// ============================================================
+function drawLongWave() {
+    if (LCW === 0 || LCH === 0) return;
+
+    lctx.fillStyle = "black";
+    lctx.fillRect(0, 0, LCW, LCH);
+
+    // 横波キャンバスと同じ水平レイアウトを計算する
+    // ただし縦方向のスケールは横波キャンバスの寸法で計算し、
+    // 水平座標だけ一致させる
+    const sxW = (CW || BASE_W) / BASE_W;
+    const syW = (CH || BASE_H) / BASE_H;
+    const scW = Math.min(sxW, syW);
+
+    const scaledR  = r * scW;
+    const scaledL  = l * scW;
+    const scaledOp = op * scW;
+
+    const wallXposRaw = scaledOp + (2 * m + c) * scaledL / 4;
+    const wallW = 40 * scW;
+    const totalGraphW = wallXposRaw + wallW;
+
+    // 横波キャンバスの幅に基づくオフセット（水平位置を揃える）
+    const upperCanvasW = CW || BASE_W;
+    const offsetX = Math.max(0, (upperCanvasW - totalGraphW) / 2);
+
+    // 縦波キャンバスの実ピクセル幅でも同じオフセットを使う
+    // ただし縦波キャンバスの幅が違う場合は比率で調整
+    const lScale = LCW / upperCanvasW;
+    const lOffsetX = offsetX * lScale;
+    const lWallXpos = (wallXposRaw + offsetX) * lScale;
+    const lWallW = wallW * lScale;
+    const lScaledR = scaledR * lScale;
+    const lScaledL = scaledL * lScale;
+
+    const centerY = LCH / 2;
+    const k = 2 * Math.PI / (scaledL); // 物理空間での波数
+
+    const phaseSign = reversePhaseStart ? -1 : 1;
+    const baseReflect = (e === -1 ? 1 : -1);
+    const sReflect = phaseSign * baseReflect;
+    const scaledV = v * scW;
+    const physWall = wallXposRaw;
+
+    // 縦波の変位振幅（横波の振幅に対応、水平変位として表示）
+    const dispAmp = scaledL / 8 * 0.75 * 0.9;
+
+    // 棒の高さと幅
+    const barH_mult = 7;
+    const barH = lScaledR * barH_mult;
+    const barW = Math.max(2, lScaledR / 2);
+    const step = lScaledR * 2; // 棒の間隔
+
+    /* 反射壁（棒の高さの2倍） */
+    const wallHeight = barH * 2;
+    const wallTop = centerY - wallHeight / 2;
+    lctx.fillStyle = "white";
+    lctx.fillRect(lWallXpos, wallTop, lWallW, wallHeight);
+
+    lctx.fillStyle = "black";
+    const wallFontSize = Math.max(10, Math.round(16 * scW * lScale));
+    lctx.font = `${wallFontSize}px sans-serif`;
+    lctx.textAlign = "center";
+    const wallCenterX = lWallXpos + lWallW / 2;
+    const wallText = "反射壁";
+    const totalTextH = wallText.length * wallFontSize * 1.2;
+    const textStartY = centerY - totalTextH / 2 + wallFontSize;
+    for (let i = 0; i < wallText.length; i++) {
+        lctx.fillText(wallText[i], wallCenterX, textStartY + i * wallFontSize * 1.2);
+    }
+
+    /* x軸（反射壁の中央に突き刺さる） */
+    lctx.strokeStyle = "white";
+    lctx.lineWidth = 2.25 * scW * lScale;
+    lctx.beginPath();
+    lctx.moveTo(lOffsetX, centerY);
+    lctx.lineTo(lWallXpos + lWallW / 2, centerY);
+    lctx.stroke();
+
+    if (resetMode) {
+        // リセット時は平衡位置に灰色の棒を表示
+        lctx.fillStyle = "gray";
+        for (let px = 0; px <= physWall; px += scaledR * 2) {
+            const drawX = (px + offsetX) * lScale;
+            lctx.fillRect(drawX - barW / 2, centerY - barH / 2, barW, barH);
+        }
+        return;
+    }
+
+    /* 合成波の縦波表示（赤い棒） */
+    // 横波の合成波の変位(y方向)を縦波の変位(x方向)に変換
+    for (let px = 0; px <= physWall; px += scaledR * 2) {
+        // 入射波の変位
+        let dispInciBase = (px <= scaledV ? Math.sin((px - scaledV) * k) : 0);
+        let dispInci = phaseSign * dispInciBase;
+
+        // 反射波の変位
+        let xMirror = 2 * physWall - px;
+        let dispRefNorm = (scaledV >= 2 * physWall - px
+            ? sReflect * Math.sin((xMirror - scaledV) * k)
+            : 0);
+
+        // 合成変位（正規化 -1〜1）
+        let totalDisp = dispInci + dispRefNorm;
+
+        // 水平変位に変換
+        let horizDisp = totalDisp * dispAmp * lScale;
+
+        const equilibX = (px + offsetX) * lScale;
+        const drawX = equilibX + horizDisp;
+
+        lctx.fillStyle = "red";
+        lctx.fillRect(drawX - barW / 2, centerY - barH / 2, barW, barH);
+    }
+
+    /* 節の位置に「密」「疎」ラベルを表示 */
+    // 定在波が十分形成された後のみ表示（波が壁に到達して反射波が戻ってきた後）
+    if (scaledV >= 2 * physWall) {
+        // 横波の定在波の節の位置を求める
+        // 自由端(e=-1): 壁位置が腹 → 節は壁から λ/4, 3λ/4, 5λ/4, ...
+        // 固定端(e=1):  壁位置が節 → 節は壁から 0, λ/2, λ, ...
+        const halfL = scaledL / 2;
+        const quarterL = scaledL / 4;
+        const nodePositions = []; // 物理座標(offsetなし)での節の位置
+
+        if (e === -1) {
+            // 自由端: 節は壁から quarterL + n*halfL の位置
+            for (let n = 0; ; n++) {
+                const nodeX = physWall - quarterL - n * halfL;
+                if (nodeX < 0) break;
+                nodePositions.push(nodeX);
+            }
+        } else {
+            // 固定端: 節は壁から n*halfL の位置
+            for (let n = 0; ; n++) {
+                const nodeX = physWall - n * halfL;
+                if (nodeX < 0) break;
+                nodePositions.push(nodeX);
+            }
+        }
+
+        // 各節の位置で密・疎を判定
+        // 節の位置での変位の空間微分（左右の変位差）で判定
+        const delta = scaledR * 0.5;
+        const densityThreshold = 0.3; // この値以上で密/疎を表示
+        const labelFontSize = Math.max(10, Math.round(28 * scW * lScale));
+        lctx.font = `bold ${labelFontSize}px sans-serif`;
+        lctx.textAlign = "center";
+        lctx.fillStyle = "white";
+
+        for (const nodeX of nodePositions) {
+            // 節の左右の微小位置での合成変位を計算
+            const pxL = nodeX - delta;
+            const pxR = nodeX + delta;
+
+            function compositeDisp(px) {
+                let di = (px <= scaledV ? Math.sin((px - scaledV) * k) : 0);
+                di = phaseSign * di;
+                let xm = 2 * physWall - px;
+                let dr = (scaledV >= 2 * physWall - px
+                    ? sReflect * Math.sin((xm - scaledV) * k)
+                    : 0);
+                return di + dr;
+            }
+
+            const dispL = compositeDisp(pxL);
+            const dispR = compositeDisp(pxR);
+            // 空間微分: 正なら右へ広がる(疎), 負なら左へ集まる(密)
+            const grad = dispR - dispL;
+
+            const screenX = (nodeX + offsetX) * lScale;
+            const labelY = centerY + barH / 2 + labelFontSize + 4 * lScale;
+
+            if (grad < -densityThreshold) {
+                lctx.fillStyle = "#cc44ff";
+                lctx.fillText("密", screenX, labelY);
+            } else if (grad > densityThreshold) {
+                lctx.fillStyle = "#44ff44";
+                lctx.fillText("疎", screenX, labelY);
+                lctx.fillText("疎", screenX, labelY);
+            }
+        }
+    }
+}
+
+function move() {
+    dv = f * av;
+    v += dv;
+}
+
+function start() {
+    setInterval(() => {
+        const rect = canvas.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0 && (CW === 0 || CH === 0)) {
+            syncCanvasSize();
+            if (buffer) {
+                buffer.width  = CW;
+                buffer.height = CH;
+            }
+        }
+        if (CW === 0 || CH === 0) return;
+
+        move();
+        drawToBuffer();
+        ctx.clearRect(0, 0, CW, CH);
+        ctx.drawImage(buffer, 0, 0);
+        drawLongWave();
+    }, 30);
+}
+
+/* ======== ボタン設定 ======== */
+document.getElementById("run").addEventListener("click", run);
+document.getElementById("stop").addEventListener("click", stop);
+document.getElementById("reset").addEventListener("click", reset);
+
+document.getElementById("free").addEventListener("click", () => {
+    e = -1;
+    updateBoundaryDisplay();
+});
+
+document.getElementById("fixed").addEventListener("click", () => {
+    e = 1;
+    updateBoundaryDisplay();
+});
+
+document.getElementById("inci").addEventListener("click", () => {
+    showInci = !showInci;
+    updateWaveButtons();
+});
+
+document.getElementById("ref").addEventListener("click", () => {
+    showRef = !showRef;
+    updateWaveButtons();
+});
+
+document.getElementById("compo").addEventListener("click", () => {
+    showCompo = !showCompo;
+    updateWaveButtons();
+});
+
+document.getElementById("phaseToggle").addEventListener("click", () => {
+    reversePhaseStart = !reversePhaseStart;
+    updatePhaseButton();
+});
+
+document.getElementById("sh").addEventListener("click", () => {
+    av = 2;
+    updateSpeedButtons();
+});
+document.getElementById("sl").addEventListener("click", () => {
+    av = 1;
+    updateSpeedButtons();
+});
+
+document.getElementById("sizeToggle").addEventListener("click", () => {
+    particleSizeSmall = !particleSizeSmall;
+    r = particleSizeSmall ? 10 : 15;
+    updateSizeButton();
+});
+
+function stop() { av = 0; updateSpeedButtons(); }
+
+function run() {
+    resetMode = false;
+    v  = 0;
+    av = 3;
+
+    showInci  = true;
+    showRef   = true;
+    showCompo = true;
+    updateWaveButtons();
+    updateSpeedButtons();
+}
+
+function reset() {
+    resetMode = true;
+    v = 0;
+    av = 0;
+
+    showInci  = false;
+    showRef   = false;
+    showCompo = false;
+    updateWaveButtons();
+    updateSpeedButtons();
+
+    drawToBuffer();
+    ctx.clearRect(0, 0, CW, CH);
+    ctx.drawImage(buffer, 0, 0);
+    drawLongWave();
+}
+
+syncCanvasSize();
+init();
+start();
+</script>
+
+</body>
+</html>
